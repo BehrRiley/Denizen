@@ -95,8 +95,8 @@ public class FakeBlockHelper {
             RegistryFriendlyByteBuf copier = new RegistryFriendlyByteBuf(Unpooled.buffer(), CraftRegistry.getMinecraftRegistry());
             originalPacket.getChunkData().write(copier);
             ClientboundLevelChunkPacketData packet = new ClientboundLevelChunkPacketData(copier, chunkX, chunkZ);
-            FriendlyByteBuf serial = originalPacket.getChunkData().getReadBuffer();
-            FriendlyByteBuf outputSerial = new FriendlyByteBuf(Unpooled.buffer(serial.readableBytes()));
+            RegistryFriendlyByteBuf serial = new RegistryFriendlyByteBuf(originalPacket.getChunkData().getReadBuffer(), CraftRegistry.getMinecraftRegistry());
+            RegistryFriendlyByteBuf outputSerial = new RegistryFriendlyByteBuf(Unpooled.buffer(serial.readableBytes()), CraftRegistry.getMinecraftRegistry());
             List blockEntities = new ArrayList((List) CHUNKDATA_BLOCK_ENTITIES.get(originalPacket.getChunkData()));
             CHUNKDATA_BLOCK_ENTITIES.set(packet, blockEntities);
             for (int i = 0; i < blockEntities.size(); i++) {
@@ -108,10 +108,46 @@ public class FakeBlockHelper {
                 for (FakeBlock block : blocks) {
                     LocationTag loc = block.location;
                     if (loc.getBlockX() == x && loc.getBlockY() == y && loc.getBlockZ() == z && block.material != null) {
-                        BlockEntity newBlockEnt = CraftBlockStates.createNewTileEntity(block.material.getMaterial());
-                        Object newData = CHUNKDATA_BLOCK_ENTITY_CONSTRUCTOR.invoke(xz, y, newBlockEnt.getType(), newBlockEnt.getUpdateTag(CraftRegistry.getMinecraftRegistry()));
-                        blockEntities.set(i, newData);
+                        BlockEntity newBlockEnt = null;
+                        BlockState nmsState = getNMSState(block);
+                        if (nmsState.getBlock() instanceof net.minecraft.world.level.block.EntityBlock) {
+                            newBlockEnt = ((net.minecraft.world.level.block.EntityBlock) nmsState.getBlock()).newBlockEntity(new net.minecraft.core.BlockPos(x, y, z), nmsState);
+                        }
+                        if (newBlockEnt != null) {
+                            Object newData = CHUNKDATA_BLOCK_ENTITY_CONSTRUCTOR.invoke(xz, y, newBlockEnt.getType(), newBlockEnt.getUpdateTag(CraftRegistry.getMinecraftRegistry()));
+                            blockEntities.set(i, newData);
+                        }
                         break;
+                    }
+                }
+            }
+            for (FakeBlock block : blocks) {
+                if (block.material != null) {
+                    int x = block.location.getBlockX();
+                    int y = block.location.getBlockY();
+                    int z = block.location.getBlockZ();
+                    BlockEntity newBlockEnt = null;
+                    BlockState nmsState = getNMSState(block);
+                    if (nmsState.getBlock() instanceof net.minecraft.world.level.block.EntityBlock) {
+                        newBlockEnt = ((net.minecraft.world.level.block.EntityBlock) nmsState.getBlock()).newBlockEntity(new net.minecraft.core.BlockPos(x, y, z), nmsState);
+                    }
+                    if (newBlockEnt != null) {
+                        boolean exists = false;
+                        for (Object blockEnt : blockEntities) {
+                            int entXZ = CHUNKDATA_BLOCKENTITYINFO_PACKEDXZ.getInt(blockEnt);
+                            int entY = CHUNKDATA_BLOCKENTITYINFO_Y.getInt(blockEnt);
+                            int entX = (chunkX << 4) + ((entXZ >> 4) & 15);
+                            int entZ = (chunkZ << 4) + (entXZ & 15);
+                            if (entX == x && entY == y && entZ == z) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) {
+                            int xz = ((x & 15) << 4) | (z & 15);
+                            Object newData = CHUNKDATA_BLOCK_ENTITY_CONSTRUCTOR.invoke(xz, y, newBlockEnt.getType(), newBlockEnt.getUpdateTag(CraftRegistry.getMinecraftRegistry()));
+                            blockEntities.add(newData);
+                        }
                     }
                 }
             }
@@ -122,7 +158,7 @@ public class FakeBlockHelper {
             Registry<Biome> biomeRegistry = ((CraftWorld) world).getHandle().registryAccess().lookupOrThrow(Registries.BIOME);
             for (int y = minChunkY; y < maxChunkY; y++) {
                 int blockCount = serial.readShort();
-                // reflected constructors as workaround for spigot remapper bug - Mojang "IdMap" became Spigot "IRegistry" but should be "Registry"
+                int fluidCount = serial.readShort();
                 PalettedContainer<BlockState> states = (PalettedContainer<BlockState>) PALETTEDCONTAINER_CTOR.newInstance(Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
                 states.read(serial);
                 PalettedContainer<Biome> biomes = (PalettedContainer<Biome>) PALETTEDCONTAINER_CTOR.newInstance(biomeRegistry.getOrThrow(Biomes.PLAINS), Strategy.createForBiomes(biomeRegistry));
@@ -133,12 +169,10 @@ public class FakeBlockHelper {
                     for (FakeBlock block : blocks) {
                         int blockY = block.location.getBlockY();
                         if (blockY >= minY && blockY < maxY && block.material != null) {
-                            int blockX = block.location.getBlockX();
-                            int blockZ = block.location.getBlockZ();
-                            blockX -= (blockX >> 4) * 16;
-                            blockY -= (blockY >> 4) * 16;
-                            blockZ -= (blockZ >> 4) * 16;
-                            BlockState oldState = states.get(blockX, blockY, blockZ);
+                            int blockX = block.location.getBlockX() & 15;
+                            int blockZ = block.location.getBlockZ() & 15;
+                            int localY = blockY & 15;
+                            BlockState oldState = states.get(blockX, localY, blockZ);
                             BlockState newState = getNMSState(block);
                             if (oldState.isAir() && !newState.isAir()) {
                                 blockCount++;
@@ -146,15 +180,20 @@ public class FakeBlockHelper {
                             else if (newState.isAir() && !oldState.isAir()) {
                                 blockCount--;
                             }
-                            states.set(blockX, blockY, blockZ, newState);
+                            states.set(blockX, localY, blockZ, newState);
                         }
                     }
                 }
                 outputSerial.writeShort(blockCount);
+                outputSerial.writeShort(fluidCount);
                 states.write(outputSerial);
                 biomes.write(outputSerial);
             }
-            byte[] outputBytes = outputSerial.array();
+            if (serial.isReadable()) {
+                outputSerial.writeBytes(serial);
+            }
+            byte[] outputBytes = new byte[outputSerial.writerIndex()];
+            outputSerial.getBytes(0, outputBytes);
             CHUNKDATA_BUFFER_SETTER.invoke(packet, outputBytes);
             CHUNKPACKET_CHUNKDATA_SETTER.invoke(duplicateCorePacket, packet);
             return duplicateCorePacket;
